@@ -4,10 +4,6 @@ services:
   bot:
     build: .
     env_file: .env
-    environment:
-      - BOT_TOKEN=YOUR_BOT_TOKEN
-      - REDIS_URL=redis
-      - TZ=Europe/Moscow
     depends_on:
       - redis
     restart: unless-stopped

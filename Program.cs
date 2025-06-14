@@ -15,13 +15,12 @@ var host = builder.Build();
 var redisConnection = await ConnectionMultiplexer.ConnectAsync(
     Environment.GetEnvironmentVariable("REDIS_URL") ?? "localhost:6379");
 var redis = redisConnection.GetDatabase();
-var logger = LoggerFactory.Create(logging => logging.AddConsole()).CreateLogger<Program>();
 
 // Инициализация бота
 var token = Environment.GetEnvironmentVariable("BOT_TOKEN")
     ?? throw new Exception("BOT_TOKEN environment variable is not set");
 
-logger.LogInformation($"Bot token: {token}");
+Console.WriteLine($"Bot token: {token}");
 
 var botClient = new TelegramBotClient(token);
 

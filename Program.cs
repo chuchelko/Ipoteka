@@ -6,7 +6,6 @@ using Telegram.Bot.Types;
 using Microsoft.Extensions.Hosting;
 using System.Globalization;
 using System.Text.Json;
-using Microsoft.Extensions.Logging;
 
 var builder = Host.CreateApplicationBuilder(args);
 var host = builder.Build();
@@ -19,13 +18,16 @@ var redis = redisConnection.GetDatabase();
 // Инициализация бота
 var token = Environment.GetEnvironmentVariable("BOT_TOKEN")
     ?? throw new Exception("BOT_TOKEN environment variable is not set");
-
-Console.WriteLine($"Bot token: {token}");
-
 var botClient = new TelegramBotClient(token);
 
+// Загрузка токенов доступа
+var readTokens = Environment.GetEnvironmentVariable("READ_TOKENS")?.Split(',')
+                 ?? throw new Exception("READ_TOKENS not set");
+var writeTokens = Environment.GetEnvironmentVariable("WRITE_TOKENS")?.Split(',')
+                  ?? throw new Exception("WRITE_TOKENS not set");
+
 // Запуск сервиса ежемесячных уведомлений
-var reminderService = new MonthlyReminderService(botClient, redis);
+var reminderService = new MonthlyReminderService(botClient, redis, readTokens);
 reminderService.Start();
 
 // Обработка входящих сообщений
@@ -45,43 +47,54 @@ await host.RunAsync();
 
 async Task HandleUpdateAsync(ITelegramBotClient bot, Update update, CancellationToken ct)
 {
-    if (update.Message is not { } message || message.Text is not { } text)
-        return;
+    if (update.Message is not { } message) return;
 
     var chatId = message.Chat.Id;
+    var userId = message.From?.Id ?? 0;
+    var text = message.Text ?? string.Empty;
     var command = text.Split(' ')[0].ToLower();
 
-    switch (command)
+    try
     {
-        case "/start":
-            await bot.SendMessage(chatId,
-                "📊 Бот для отслеживания кредита\n\n" +
-                "Доступные команды:\n" +
-                "/set [сумма] - установить сумму кредита\n" +
-                "/pay [сумма] - внести платеж\n" +
-                "/status - текущий остаток\n" +
-                "/history - история платежей");
-            break;
+        switch (command)
+        {
+            case "/start":
+                await SendHelp(chatId);
+                break;
 
-        case "/set":
-            await SetCreditAmount(chatId, text);
-            break;
+            case "/authorize":
+                await HandleAuthorize(chatId, text, redis);
+                break;
 
-        case "/pay":
-            await ProcessPayment(chatId, text);
-            break;
+            case "/user_authorize":
+                await HandleUserAuthorize(userId, text, redis);
+                break;
 
-        case "/status":
-            await ShowStatus(chatId);
-            break;
+            case "/set":
+                await HandleSet(chatId, userId, text, redis);
+                break;
 
-        case "/history":
-            await ShowHistory(chatId);
-            break;
+            case "/pay":
+                await HandlePay(userId, text, redis);
+                break;
 
-        default:
-            await bot.SendMessage(chatId, "Неизвестная команда. Используйте /start для справки");
-            break;
+            case "/status":
+                await ShowStatus(chatId, redis);
+                break;
+
+            case "/history":
+                await ShowHistory(chatId, redis);
+                break;
+
+            default:
+                await botClient.SendMessage(chatId, "Неизвестная команда. Используйте /start для справки");
+                break;
+        }
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"Ошибка обработки команды: {ex.Message}");
+        await botClient.SendMessage(chatId, $"❌ Ошибка: {ex.Message}");
     }
 }
 
@@ -98,13 +111,69 @@ Task HandlePollingErrorAsync(ITelegramBotClient bot, Exception exception, Cancel
     return Task.CompletedTask;
 }
 
-// Redis ключи
-static string GetCreditKey(long chatId) => $"credit:{chatId}";
-static string GetHistoryKey(long chatId) => $"history:{chatId}";
-
-// Работа с кредитом
-async Task SetCreditAmount(long chatId, string text)
+async Task SendHelp(long chatId)
 {
+    await botClient.SendMessage(chatId,
+        "🏦 Бот управления кредитом\n\n" +
+        "Доступные команды:\n" +
+        "/authorize [токен] - авторизовать чат (чтение)\n" +
+        "/user_authorize [токен] - авторизовать себя (запись)\n" +
+        "/set [сумма] - установить сумму кредита\n" +
+        "/pay [сумма] - внести платеж\n" +
+        "/status - текущий остаток\n" +
+        "/history - история платежей");
+}
+
+async Task HandleAuthorize(long chatId, string text, IDatabase redis)
+{
+    var parts = text.Split(' ');
+    if (parts.Length < 2)
+    {
+        await botClient.SendMessage(chatId, "❌ Не указан токен. Используйте: /authorize ваш_токен");
+        return;
+    }
+
+    var token = parts[1].Trim();
+    if (readTokens.Contains(token) || writeTokens.Contains(token))
+    {
+        await redis.SetAddAsync(UtilityKeys.AuthChatsKey(), chatId);
+        await botClient.SendMessage(chatId, "✅ Чат авторизован для чтения!");
+    }
+    else
+    {
+        await botClient.SendMessage(chatId, "❌ Неверный токен авторизации");
+    }
+}
+
+async Task HandleUserAuthorize(long userId, string text, IDatabase redis)
+{
+    var parts = text.Split(' ');
+    if (parts.Length < 2)
+    {
+        return; // Пользователь не может ответить в группе, поэтому ошибку не отправляем
+    }
+
+    var token = parts[1].Trim();
+    if (writeTokens.Contains(token))
+    {
+        await redis.SetAddAsync(UtilityKeys.AuthUsersKey(), userId);
+        await botClient.SendMessage(userId, "✅ Вы авторизованы для внесения платежей!");
+    }
+    else
+    {
+        await botClient.SendMessage(userId, "❌ Неверный токен авторизации");
+    }
+}
+
+async Task HandleSet(long chatId, long userId, string text, IDatabase redis)
+{
+    // Проверка прав пользователя
+    if (!await redis.SetContainsAsync(UtilityKeys.AuthUsersKey(), userId))
+    {
+        await botClient.SendMessage(chatId, "❌ У вас нет прав на установку суммы кредита");
+        return;
+    }
+
     var parts = text.Split(' ');
     if (parts.Length < 2 || !decimal.TryParse(parts[1], NumberStyles.Currency, CultureInfo.InvariantCulture, out var amount))
     {
@@ -112,60 +181,89 @@ async Task SetCreditAmount(long chatId, string text)
         return;
     }
 
+    // Сохраняем сумму кредита
     var creditData = new CreditData
     {
         InitialAmount = amount,
-        CurrentAmount = amount
+        CurrentAmount = amount,
+        LastUpdated = DateTime.UtcNow
     };
 
-    await redis.StringSetAsync(GetCreditKey(chatId), JsonSerializer.Serialize(creditData));
-    await redis.KeyDeleteAsync(GetHistoryKey(chatId)); // Очищаем историю
+    await redis.StringSetAsync(UtilityKeys.CreditKey(), JsonSerializer.Serialize(creditData));
+
+    // Очищаем историю
+    await redis.KeyDeleteAsync(UtilityKeys.HistoryKey());
 
     await botClient.SendMessage(chatId, $"✅ Начальная сумма кредита установлена: {amount:C}");
+
+    // Уведомляем все авторизованные чаты
+    await NotifyAllChats($"💰 Установлена новая сумма кредита: {amount:C}", redis);
 }
 
-async Task ProcessPayment(long chatId, string text)
+async Task HandlePay(long userId, string text, IDatabase redis)
 {
-    var creditJson = await redis.StringGetAsync(GetCreditKey(chatId));
-    if (creditJson.IsNullOrEmpty)
+    // Проверка прав пользователя
+    if (!await redis.SetContainsAsync(UtilityKeys.AuthUsersKey(), userId))
     {
-        await botClient.SendMessage(chatId, "❌ Сначала установите сумму кредита (/set [сумма])");
+        // Отправляем в личку пользователю
+        await botClient.SendMessage(userId,
+            "❌ У вас нет прав на внесение платежа. Используйте /user_authorize [токен]");
         return;
     }
 
     var parts = text.Split(' ');
     if (parts.Length < 2 || !decimal.TryParse(parts[1], NumberStyles.Currency, CultureInfo.InvariantCulture, out var payment))
     {
-        await botClient.SendMessage(chatId, "❌ Неверный формат. Используйте: /pay 15000");
+        await botClient.SendMessage(userId, "❌ Неверный формат. Используйте: /pay 15000");
+        return;
+    }
+
+    // Получаем текущие данные кредита
+    var creditJson = await redis.StringGetAsync(UtilityKeys.CreditKey());
+    if (creditJson.IsNullOrEmpty)
+    {
+        await botClient.SendMessage(userId, "❌ Сначала установите сумму кредита (/set [сумма])");
         return;
     }
 
     var credit = JsonSerializer.Deserialize<CreditData>(creditJson!)!;
     credit.CurrentAmount -= payment;
+    credit.LastUpdated = DateTime.UtcNow;
 
     // Сохраняем обновленный кредит
-    await redis.StringSetAsync(GetCreditKey(chatId), JsonSerializer.Serialize(credit));
+    await redis.StringSetAsync(UtilityKeys.CreditKey(), JsonSerializer.Serialize(credit));
 
     // Сохраняем платеж в историю
     var paymentRecord = new PaymentRecord
     {
+        UserId = userId,
         Amount = payment,
         Date = DateTime.UtcNow,
         NewBalance = credit.CurrentAmount
     };
-    await redis.ListRightPushAsync(GetHistoryKey(chatId), JsonSerializer.Serialize(paymentRecord));
+    await redis.ListRightPushAsync(UtilityKeys.HistoryKey(), JsonSerializer.Serialize(paymentRecord));
 
-    await botClient.SendMessage(chatId,
-        $"✅ Платеж {payment:C} принят!\n" +
-        $"Новый остаток: {credit.CurrentAmount:C}");
+    // Уведомление пользователю
+    await botClient.SendMessage(userId,
+        $"✅ Платеж {payment:C} принят!\nНовый остаток: {credit.CurrentAmount:C}");
+
+    // Уведомляем все авторизованные чаты
+    await NotifyAllChats($"💳 Внесен платеж: {payment:C}\nОстаток по кредиту: {credit.CurrentAmount:C}", redis);
 }
 
-async Task ShowStatus(long chatId)
+async Task ShowStatus(long chatId, IDatabase redis)
 {
-    var creditJson = await redis.StringGetAsync(GetCreditKey(chatId));
+    // Проверка авторизации чата
+    if (!await redis.SetContainsAsync(UtilityKeys.AuthChatsKey(), chatId))
+    {
+        await botClient.SendMessage(chatId, "❌ Чат не авторизован. Используйте /authorize [токен]");
+        return;
+    }
+
+    var creditJson = await redis.StringGetAsync(UtilityKeys.CreditKey());
     if (creditJson.IsNullOrEmpty)
     {
-        await botClient.SendMessage(chatId, "❌ Кредит не установлен. Используйте /set [сумма]");
+        await botClient.SendMessage(chatId, "❌ Сумма кредита не установлена");
         return;
     }
 
@@ -173,9 +271,16 @@ async Task ShowStatus(long chatId)
     await botClient.SendMessage(chatId, $"💳 Текущий остаток по кредиту: {credit.CurrentAmount:C}");
 }
 
-async Task ShowHistory(long chatId)
+async Task ShowHistory(long chatId, IDatabase redis)
 {
-    var history = await redis.ListRangeAsync(GetHistoryKey(chatId));
+    // Проверка авторизации чата
+    if (!await redis.SetContainsAsync(UtilityKeys.AuthChatsKey(), chatId))
+    {
+        await botClient.SendMessage(chatId, "❌ Чат не авторизован. Используйте /authorize [токен]");
+        return;
+    }
+
+    var history = await redis.ListRangeAsync(UtilityKeys.HistoryKey());
     if (history.Length == 0)
     {
         await botClient.SendMessage(chatId, "📭 История платежей пуста");
@@ -192,15 +297,47 @@ async Task ShowHistory(long chatId)
     await botClient.SendMessage(chatId, response);
 }
 
+async Task NotifyAllChats(string message, IDatabase redis)
+{
+    var chatIds = await redis.SetMembersAsync(UtilityKeys.AuthChatsKey());
+    foreach (var chatIdValue in chatIds)
+    {
+        if (long.TryParse(chatIdValue.ToString(), out var chatId))
+        {
+            try
+            {
+                await botClient.SendMessage(chatId, message);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Ошибка отправки в чат {chatId}: {ex.Message}");
+                // Автоматически удаляем неработающие чаты
+                await redis.SetRemoveAsync(UtilityKeys.AuthChatsKey(), chatIdValue);
+            }
+        }
+    }
+}
+
 // Модели данных
+// Переместите функции CreditKey, UtilityKeys.HistoryKey, UtilityKeys.AuthChatsKey и UtilityKeys.AuthUsersKey из верхнего уровня в статический класс UtilityKeys
+static class UtilityKeys
+{
+    public static string CreditKey() => "credit:global";
+    public static string HistoryKey() => "history:global";
+    public static string AuthChatsKey() => "auth:chats";
+    public static string AuthUsersKey() => "auth:users";
+}
+
 record CreditData
 {
     public decimal InitialAmount { get; set; }
     public decimal CurrentAmount { get; set; }
+    public DateTime LastUpdated { get; set; }
 }
 
 record PaymentRecord
 {
+    public long UserId { get; set; }
     public decimal Amount { get; set; }
     public DateTime Date { get; set; }
     public decimal NewBalance { get; set; }
@@ -211,12 +348,14 @@ class MonthlyReminderService
 {
     private readonly ITelegramBotClient _bot;
     private readonly IDatabase _redis;
+    private readonly string[] _readTokens;
     private Timer? _timer;
 
-    public MonthlyReminderService(ITelegramBotClient bot, IDatabase redis)
+    public MonthlyReminderService(ITelegramBotClient bot, IDatabase redis, string[] readTokens)
     {
         _bot = bot;
         _redis = redis;
+        _readTokens = readTokens;
     }
 
     public void Start()
@@ -226,30 +365,52 @@ class MonthlyReminderService
         var nextDate = new DateTime(now.Year, now.Month, 1).AddMonths(1);
         var initialDelay = nextDate - now;
 
-        _timer = new Timer(SendReminders, null, initialDelay, TimeSpan.FromDays(30));
+        _timer = new Timer(SendMonthlyReminders, null, initialDelay, TimeSpan.FromDays(30));
     }
 
-    private async void SendReminders(object? state)
+    private async void SendMonthlyReminders(object? state)
     {
-        // Получаем все ключи кредитов
-        var keys = _redis.Multiplexer.GetServer(_redis.Multiplexer.GetEndPoints().First())
-            .Keys(pattern: "credit:*")
-            .ToArray();
-
-        foreach (var key in keys)
+        try
         {
-            var chatId = long.Parse(key.ToString().Split(':')[1]);
-            var creditJson = await _redis.StringGetAsync(key);
-            if (creditJson.IsNullOrEmpty) continue;
+            // Получаем данные кредита
+            var creditJson = await _redis.StringGetAsync(UtilityKeys.CreditKey());
+            if (creditJson.IsNullOrEmpty) return;
 
             var credit = JsonSerializer.Deserialize<CreditData>(creditJson!)!;
-            if (credit.CurrentAmount > 0)
+
+            // Получаем историю
+            var history = await _redis.ListRangeAsync(UtilityKeys.HistoryKey());
+            var historyText = history.Length == 0
+                ? "История платежей пуста"
+                : $"Последние платежи:\n{string.Join("\n", history.Select(h => {
+                    var p = JsonSerializer.Deserialize<PaymentRecord>(h!);
+                    return $"{p!.Date:dd.MM.yyyy}: -{p.Amount:C}";
+                }))}";
+
+            var message = $"📅 Ежемесячное обновление:\n" +
+                          $"Остаток по кредиту: {credit.CurrentAmount:C}\n" +
+                          $"{historyText}";
+
+            // Отправляем во все авторизованные чаты
+            var chatIds = await _redis.SetMembersAsync(UtilityKeys.AuthChatsKey());
+            foreach (var chatIdValue in chatIds)
             {
-                await _bot.SendMessage(
-                    chatId: chatId,
-                    text: $"📅 Ежемесячное обновление:\nОстаток по кредиту: {credit.CurrentAmount:C}"
-                );
+                if (long.TryParse(chatIdValue.ToString(), out var chatId))
+                {
+                    try
+                    {
+                        await _bot.SendMessage(chatId, message);
+                    }
+                    catch
+                    {
+                        // Игнорируем ошибки отправки
+                    }
+                }
             }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Ошибка при отправке ежемесячных уведомлений: {ex.Message}");
         }
     }
 }

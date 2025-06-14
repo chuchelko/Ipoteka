@@ -86,6 +86,10 @@ async Task HandleUpdateAsync(ITelegramBotClient bot, Update update, Cancellation
                 await ShowHistory(chatId, redis);
                 break;
 
+            case "/gav":
+                await botClient.SendMessage(chatId, "ГАВ");
+                break;
+
             default:
                 await botClient.SendMessage(chatId, "Неизвестная команда. Используйте /start для справки");
                 break;

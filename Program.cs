@@ -198,10 +198,10 @@ async Task HandleSet(long chatId, long userId, string text, IDatabase redis)
     // Очищаем историю
     await redis.KeyDeleteAsync(UtilityKeys.HistoryKey());
 
-    await botClient.SendMessage(chatId, $"✅ Начальная сумма кредита установлена: {amount:C}");
+    await botClient.SendMessage(chatId, $"✅ Начальная сумма кредита установлена: {amount} р");
 
     // Уведомляем все авторизованные чаты
-    await NotifyAllChats($"💰 Установлена новая сумма кредита: {amount:C}", redis);
+    await NotifyAllChats($"💰 Установлена новая сумма кредита: {amount} р", redis);
 }
 
 async Task HandlePay(long userId, string text, IDatabase redis)
@@ -249,10 +249,10 @@ async Task HandlePay(long userId, string text, IDatabase redis)
 
     // Уведомление пользователю
     await botClient.SendMessage(userId,
-        $"✅ Платеж {payment:C} принят!\nНовый остаток: {credit.CurrentAmount:C}");
+        $"✅ Платеж {payment} р принят!\nНовый остаток: {credit.CurrentAmount} р");
 
     // Уведомляем все авторизованные чаты
-    await NotifyAllChats($"💳 Внесен платеж: {payment:C}\nОстаток по кредиту: {credit.CurrentAmount:C}", redis);
+    await NotifyAllChats($"💳 Внесен платеж: {payment} р\nОстаток по кредиту: {credit.CurrentAmount} р", redis);
 }
 
 async Task ShowStatus(long chatId, IDatabase redis)
@@ -272,7 +272,7 @@ async Task ShowStatus(long chatId, IDatabase redis)
     }
 
     var credit = JsonSerializer.Deserialize<CreditData>(creditJson!)!;
-    await botClient.SendMessage(chatId, $"💳 Текущий остаток по кредиту: {credit.CurrentAmount:C}");
+    await botClient.SendMessage(chatId, $"💳 Текущий остаток по кредиту: {credit.CurrentAmount} р");
 }
 
 async Task ShowHistory(long chatId, IDatabase redis)
@@ -295,7 +295,7 @@ async Task ShowHistory(long chatId, IDatabase redis)
     foreach (var item in history)
     {
         var payment = JsonSerializer.Deserialize<PaymentRecord>(item!);
-        response += $"{payment!.Date:dd.MM.yyyy}: -{payment.Amount:C} → {payment.NewBalance:C}\n";
+        response += $"{payment!.Date:dd.MM.yyyy}: -{payment.Amount} р → {payment.NewBalance} р\n";
     }
 
     await botClient.SendMessage(chatId, response);
@@ -388,11 +388,11 @@ class MonthlyReminderService
                 ? "История платежей пуста"
                 : $"Последние платежи:\n{string.Join("\n", history.Select(h => {
                     var p = JsonSerializer.Deserialize<PaymentRecord>(h!);
-                    return $"{p!.Date:dd.MM.yyyy}: -{p.Amount:C}";
+                    return $"{p!.Date:dd.MM.yyyy}: -{p.Amount} р";
                 }))}";
 
             var message = $"📅 Ежемесячное обновление:\n" +
-                          $"Остаток по кредиту: {credit.CurrentAmount:C}\n" +
+                          $"Остаток по кредиту: {credit.CurrentAmount} р\n" +
                           $"{historyText}";
 
             // Отправляем во все авторизованные чаты

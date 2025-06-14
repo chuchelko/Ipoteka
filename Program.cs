@@ -198,8 +198,6 @@ async Task HandleSet(long chatId, long userId, string text, IDatabase redis)
     // Очищаем историю
     await redis.KeyDeleteAsync(UtilityKeys.HistoryKey());
 
-    await botClient.SendMessage(chatId, $"✅ Начальная сумма кредита установлена: {amount} р");
-
     // Уведомляем все авторизованные чаты
     await NotifyAllChats($"💰 Установлена новая сумма кредита: {amount} р", redis);
 }

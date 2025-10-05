@@ -20,10 +20,15 @@ public class MonthlyReminderService
         _readTokens = readTokens;
     }
 
+    private static DateTime GetCurrentTimeUtc3()
+    {
+        return TimeZoneInfo.ConvertTime(DateTime.UtcNow, TimeZoneInfo.FindSystemTimeZoneById("Europe/Moscow"));
+    }
+
     public void Start()
     {
         // Расчет времени до следующего 1-го числа
-        var now = DateTime.UtcNow;
+        var now = GetCurrentTimeUtc3();
         var nextDate = new DateTime(now.Year, now.Month, 1).AddMonths(1);
         var initialDelay = nextDate - now;
 

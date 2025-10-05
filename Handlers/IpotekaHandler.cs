@@ -7,6 +7,7 @@ using System.Text.Json;
 using Telegram.Bot;
 
 namespace Ipoteka.Handlers;
+
 public class IpotekaHandler
 {
     public ITelegramBotClient botClient { get; set; }
@@ -18,6 +19,11 @@ public class IpotekaHandler
         this.botClient = botClient;
         this.readTokens = readTokens;
         this.writeTokens = writeTokens;
+    }
+
+    private static DateTime GetCurrentTimeUtc3()
+    {
+        return TimeZoneInfo.ConvertTime(DateTime.UtcNow, TimeZoneInfo.FindSystemTimeZoneById("Europe/Moscow"));
     }
 
     public async Task HandleAuthorize(long chatId, string text, IDatabase redis)
@@ -82,7 +88,7 @@ public class IpotekaHandler
         {
             InitialAmount = amount,
             CurrentAmount = amount,
-            LastUpdated = DateTime.UtcNow
+            LastUpdated = GetCurrentTimeUtc3()
         };
 
         await redis.StringSetAsync(UtilityKeys.CreditKey(), JsonSerializer.Serialize(creditData));
@@ -122,7 +128,7 @@ public class IpotekaHandler
 
         var credit = JsonSerializer.Deserialize<CreditData>(creditJson!)!;
         credit.CurrentAmount -= payment;
-        credit.LastUpdated = DateTime.UtcNow;
+        credit.LastUpdated = GetCurrentTimeUtc3();
 
         // Сохраняем обновленный кредит
         await redis.StringSetAsync(UtilityKeys.CreditKey(), JsonSerializer.Serialize(credit));
@@ -132,7 +138,7 @@ public class IpotekaHandler
         {
             UserId = userId,
             Amount = payment,
-            Date = DateTime.UtcNow,
+            Date = GetCurrentTimeUtc3(),
             NewBalance = credit.CurrentAmount
         };
         await redis.ListRightPushAsync(UtilityKeys.HistoryKey(), JsonSerializer.Serialize(paymentRecord));

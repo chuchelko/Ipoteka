@@ -121,6 +121,10 @@ async Task HandleUpdateAsync(ITelegramBotClient bot, Update update, Cancellation
                     await financeHandler.HandleFinAnalytics(userId, text, redis);
                     break;
 
+                case "/fin_history":
+                    await financeHandler.HandleExpenseHistory(userId, text, redis);
+                    break;
+
                 case "/gav":
                     await botClient.SendMessage(chatId, "ГАВ");
                     break;
@@ -130,6 +134,11 @@ async Task HandleUpdateAsync(ITelegramBotClient bot, Update update, Cancellation
                     if (decimal.TryParse(text.Replace(" ", "").Replace(",", "."), NumberStyles.Currency, CultureInfo.InvariantCulture, out _))
                     {
                         await financeHandler.HandleExpenseAmount(userId, text, redis);
+                    }
+                    // Проверяем, является ли сообщение планируемым расходом категории
+                    else if (IsCategoryPlannedAmountInput(userId, text, redis))
+                    {
+                        await financeHandler.HandleCategoryPlannedAmount(userId, text, redis);
                     }
                     else
                     {
@@ -165,7 +174,7 @@ async Task HandleUpdateAsync(ITelegramBotClient bot, Update update, Cancellation
                     var tempCategoryKey = $"expense_temp_category:{userId}";
                     await redis.StringSetAsync(tempCategoryKey, category);
 
-                    await botClient.AnswerCallbackQuery(callbackData, "Теперь введите сумму расхода");
+                    await botClient.AnswerCallbackQuery(callbackData, null, showAlert: false);
                     await botClient.SendMessage(userId, "💬 Введите сумму расхода (например: 1500):");
                 }
             }
@@ -174,8 +183,24 @@ async Task HandleUpdateAsync(ITelegramBotClient bot, Update update, Cancellation
                 var tempCategoryKey = $"expense_temp_category:{userId}";
                 await redis.KeyDeleteAsync(tempCategoryKey);
 
-                await botClient.AnswerCallbackQuery(callbackData, "Операция отменена");
+                await botClient.AnswerCallbackQuery(callbackData, null, showAlert: false);
                 await botClient.SendMessage(userId, "❌ Добавление расхода отменено");
+            }
+            // Обрабатываем callback для истории расходов
+            else if (callbackData.Contains("expense_history") || callbackData.Contains("expense_edit") || callbackData.Contains("expense_delete"))
+            {
+                await financeHandler.HandleExpenseHistoryCallback(userId, callbackData, redis);
+            }
+            // Обрабатываем callback для выбора месяца аналитики
+            else if (callbackData.StartsWith("analytics_month:"))
+            {
+                var parts = callbackData.Split(':');
+                if (parts.Length >= 3)
+                {
+                    var month = parts[1];
+                    await botClient.AnswerCallbackQuery(callbackData, null, showAlert: false);
+                    await financeHandler.ShowExpenseAnalytics(userId, month, redis);
+                }
             }
         }
         catch (Exception ex)
@@ -204,9 +229,20 @@ async Task SendHelp(long chatId)
         "/fin_categories - показать все категории\n" +
         "/fin_set_budget [месяц] [сумма] - установить бюджет на месяц\n" +
         "/fin_add_expense - добавить расход (по кнопкам)\n" +
-        "/fin_analytics [месяц] - аналитика расходов\n\n" +
+        "/fin_history [месяц] - история расходов с редактированием\n" +
+        "/fin_analytics - аналитика расходов с графиком\n\n" +
         "🎭 Прочее:\n" +
         "/gav - гаф");
+}
+
+bool IsCategoryPlannedAmountInput(long userId, string text, IDatabase redis)
+{
+    // Проверяем, есть ли временные категории для этого пользователя
+    var pattern = $"temp_category:{userId}:*";
+    var server = redis.Multiplexer.GetServer(redis.Multiplexer.GetEndPoints()[0]);
+    var tempKeys = server.Keys(pattern: pattern).ToArray();
+
+    return tempKeys.Length > 0 && decimal.TryParse(text.Replace(" ", "").Replace(",", "."), NumberStyles.Currency, CultureInfo.InvariantCulture, out _);
 }
 
 Task HandlePollingErrorAsync(ITelegramBotClient bot, Exception exception, CancellationToken ct)

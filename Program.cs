@@ -10,6 +10,10 @@ using Ipoteka.Services;
 
 var builder = Host.CreateApplicationBuilder(args);
 var host = builder.Build();
+Console.WriteLine(Environment.GetEnvironmentVariable("REDIS_URL"));
+Console.WriteLine(Environment.GetEnvironmentVariable("READ_TOKENS"));
+Console.WriteLine(Environment.GetEnvironmentVariable("WRITE_TOKENS"));
+Console.WriteLine(Environment.GetEnvironmentVariable("FIN_TOKEN"));
 
 // Конфигурация Redis
 var redisConnection = await ConnectionMultiplexer.ConnectAsync(

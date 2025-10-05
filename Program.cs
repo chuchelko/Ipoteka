@@ -6,7 +6,9 @@ using Telegram.Bot;
 using Telegram.Bot.Exceptions;
 using Telegram.Bot.Polling;
 using Telegram.Bot.Types;
+using Telegram.Bot.Types.ReplyMarkups;
 using Ipoteka.Services;
+using System.Globalization;
 
 var builder = Host.CreateApplicationBuilder(args);
 var host = builder.Build();
@@ -56,82 +58,130 @@ await host.RunAsync();
 
 async Task HandleUpdateAsync(ITelegramBotClient bot, Update update, CancellationToken ct)
 {
-    if (update.Message is not { } message) return;
-
-    var chatId = message.Chat.Id;
-    var userId = message.From?.Id ?? 0;
-    var text = message.Text ?? string.Empty;
-    var command = text.Split(' ')[0].ToLower();
-
-    try
+    if (update.Message is { } message)
     {
-        switch (command)
+        var chatId = message.Chat.Id;
+        var userId = message.From?.Id ?? 0;
+        var text = message.Text ?? string.Empty;
+        var command = text.Split(' ')[0].ToLower();
+
+        try
         {
-            case "/start":
-                await SendHelp(chatId);
-                break;
+            switch (command)
+            {
+                case "/start":
+                    await SendHelp(chatId);
+                    break;
 
-            case "/authorize":
-                await ipotekaHandler.HandleAuthorize(chatId, text, redis);
-                break;
+                case "/authorize":
+                    await ipotekaHandler.HandleAuthorize(chatId, text, redis);
+                    break;
 
-            case "/user_authorize":
-                await ipotekaHandler.HandleUserAuthorize(userId, text, redis);
-                break;
+                case "/user_authorize":
+                    await ipotekaHandler.HandleUserAuthorize(userId, text, redis);
+                    break;
 
-            case "/set":
-                await ipotekaHandler.HandleSet(chatId, userId, text, redis);
-                break;
+                case "/set":
+                    await ipotekaHandler.HandleSet(chatId, userId, text, redis);
+                    break;
 
-            case "/pay":
-                await ipotekaHandler.HandlePay(userId, text, redis);
-                break;
+                case "/pay":
+                    await ipotekaHandler.HandlePay(userId, text, redis);
+                    break;
 
-            case "/status":
-                await ipotekaHandler.ShowStatus(chatId, redis);
-                break;
+                case "/status":
+                    await ipotekaHandler.ShowStatus(chatId, redis);
+                    break;
 
-            case "/history":
-                await ipotekaHandler.ShowHistory(chatId, redis);
-                break;
+                case "/history":
+                    await ipotekaHandler.ShowHistory(chatId, redis);
+                    break;
 
-            case "/fin_auth":
-                await financeHandler.HandleFinAuth(userId, text, redis);
-                break;
+                case "/fin_auth":
+                    await financeHandler.HandleFinAuth(userId, text, redis);
+                    break;
 
-            case "/fin_add_category":
-                await financeHandler.HandleFinAddCategory(userId, text, redis);
-                break;
+                case "/fin_add_category":
+                    await financeHandler.HandleFinAddCategory(userId, text, redis);
+                    break;
 
-            case "/fin_categories":
-                await financeHandler.HandleFinListCategories(userId, redis);
-                break;
+                case "/fin_categories":
+                    await financeHandler.HandleFinListCategories(userId, redis);
+                    break;
 
-            case "/fin_set_budget":
-                await financeHandler.HandleFinSetBudget(userId, text, redis);
-                break;
+                case "/fin_set_budget":
+                    await financeHandler.HandleFinSetBudget(userId, text, redis);
+                    break;
 
-            case "/fin_add_expense":
-                await financeHandler.HandleFinAddExpense(userId, redis);
-                break;
+                case "/fin_add_expense":
+                    await financeHandler.HandleFinAddExpense(userId, redis);
+                    break;
 
-            case "/fin_analytics":
-                await financeHandler.HandleFinAnalytics(userId, text, redis);
-                break;
+                case "/fin_analytics":
+                    await financeHandler.HandleFinAnalytics(userId, text, redis);
+                    break;
 
-            case "/gav":
-                await botClient.SendMessage(chatId, "ГАВ");
-                break;
-            
-            default:
-                await botClient.SendMessage(chatId, "Неизвестная команда. Используйте /start для справки");
-                break;
+                case "/gav":
+                    await botClient.SendMessage(chatId, "ГАВ");
+                    break;
+
+                default:
+                    // Проверяем, является ли сообщение суммой расхода
+                    if (decimal.TryParse(text.Replace(" ", "").Replace(",", "."), NumberStyles.Currency, CultureInfo.InvariantCulture, out _))
+                    {
+                        await financeHandler.HandleExpenseAmount(userId, text, redis);
+                    }
+                    else
+                    {
+                        await botClient.SendMessage(chatId, "Неизвестная команда. Используйте /start для справки");
+                    }
+                    break;
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Ошибка обработки команды: {ex.Message}");
+            await botClient.SendMessage(chatId, $"❌ Ошибка: {ex.Message}");
         }
     }
-    catch (Exception ex)
+    else if (update.CallbackQuery is { } callbackQuery)
     {
-        Console.WriteLine($"Ошибка обработки команды: {ex.Message}");
-        await botClient.SendMessage(chatId, $"❌ Ошибка: {ex.Message}");
+        var userId = callbackQuery.From.Id;
+        var callbackData = callbackQuery.Data ?? string.Empty;
+
+        try
+        {
+            // Обрабатываем callback для выбора категории расхода
+            if (callbackData.StartsWith("expense_category:"))
+            {
+                await financeHandler.HandleExpenseCallback(userId, callbackData, redis);
+            }
+            else if (callbackData.StartsWith("expense_amount:"))
+            {
+                var parts = callbackData.Split(':');
+                if (parts.Length >= 3)
+                {
+                    var category = parts[1];
+                    var tempCategoryKey = $"expense_temp_category:{userId}";
+                    await redis.StringSetAsync(tempCategoryKey, category);
+
+                    await botClient.AnswerCallbackQuery(callbackData, "Теперь введите сумму расхода");
+                    await botClient.SendMessage(userId, "💬 Введите сумму расхода (например: 1500):");
+                }
+            }
+            else if (callbackData.StartsWith("expense_cancel:"))
+            {
+                var tempCategoryKey = $"expense_temp_category:{userId}";
+                await redis.KeyDeleteAsync(tempCategoryKey);
+
+                await botClient.AnswerCallbackQuery(callbackData, "Операция отменена");
+                await botClient.SendMessage(userId, "❌ Добавление расхода отменено");
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Ошибка обработки callback: {ex.Message}");
+        }
     }
 }
 
@@ -153,7 +203,7 @@ async Task SendHelp(long chatId)
         "/fin_add_category [категория] - добавить категорию расходов\n" +
         "/fin_categories - показать все категории\n" +
         "/fin_set_budget [месяц] [сумма] - установить бюджет на месяц\n" +
-        "/fin_add_expense - добавить расход (в разработке)\n" +
+        "/fin_add_expense - добавить расход (по кнопкам)\n" +
         "/fin_analytics [месяц] - аналитика расходов\n\n" +
         "🎭 Прочее:\n" +
         "/gav - гаф");

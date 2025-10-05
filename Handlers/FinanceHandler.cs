@@ -4,6 +4,8 @@ using System.Text.Json;
 using System.Linq;
 
 using Telegram.Bot;
+using Telegram.Bot.Types;
+using Telegram.Bot.Types.ReplyMarkups;
 using Ipoteka.Models;
 
 namespace Ipoteka.Handlers;
@@ -104,8 +106,22 @@ public class FinanceHandler
             return;
         }
 
-        // Пример — позже заменим на inline кнопки
-        await _botClient.SendMessage(userId, "💡 Скоро появится режим добавления трат по кнопкам.");
+        // Создаем кнопки с категориями
+        var buttons = categories.Select(category => InlineKeyboardButton.WithCallbackData(
+            category.ToString(), $"expense_category:{category}:{userId}")).ToList();
+
+        // Разбиваем на ряды по 2 кнопки
+        var rows = new List<IEnumerable<InlineKeyboardButton>>();
+        for (int i = 0; i < buttons.Count; i += 2)
+        {
+            rows.Add(buttons.Skip(i).Take(2));
+        }
+
+        var inlineKeyboard = new InlineKeyboardMarkup(rows);
+
+        await _botClient.SendMessage(userId,
+            "💰 Выберите категорию для расхода:",
+            replyMarkup: inlineKeyboard);
     }
 
     public async Task HandleFinAnalytics(long userId, string text, IDatabase redis)
@@ -128,5 +144,96 @@ public class FinanceHandler
         var total = expenses.Sum(x => x.Sum);
         var textReport = string.Join("\n", expenses.Select(e => $"{e.Category}: {e.Sum}₽ ({e.Sum / total:P0})"));
         await _botClient.SendMessage(userId, $"📊 Расходы за {month}:\n{textReport}");
+    }
+
+    public async Task HandleExpenseCallback(long userId, string callbackData, IDatabase redis)
+    {
+        var parts = callbackData.Split(':');
+        if (parts.Length < 3 || parts[0] != "expense_category") return;
+
+        var category = parts[1];
+        var originalUserId = long.Parse(parts[2]);
+
+        // Проверяем, что callback от того же пользователя
+        if (originalUserId != userId) return;
+
+        // Проверяем авторизацию пользователя
+        if (!await redis.SetContainsAsync(UtilityKeys.FinAuthUsersKey(), userId))
+        {
+            await _botClient.AnswerCallbackQuery(callbackData, "❌ Нет доступа к финансовому учету");
+            return;
+        }
+
+        // Создаем кнопки для ввода суммы
+        var amountButtons = new[]
+        {
+            new[] { InlineKeyboardButton.WithCallbackData("💰 Ввести сумму", $"expense_amount:{category}:{userId}") },
+            new[] { InlineKeyboardButton.WithCallbackData("❌ Отмена", $"expense_cancel:{userId}") }
+        };
+
+        var keyboard = new InlineKeyboardMarkup(amountButtons);
+
+        await _botClient.SendMessage(userId,
+            $"✅ Выбрана категория: {category}\n\n💬 Теперь введите сумму расхода (например: 1500)",
+            replyMarkup: keyboard);
+
+        await _botClient.AnswerCallbackQuery(callbackData, $"Выбрана категория: {category}");
+    }
+
+    public async Task HandleExpenseAmount(long userId, string messageText, IDatabase redis)
+    {
+        // Проверяем авторизацию пользователя
+        if (!await redis.SetContainsAsync(UtilityKeys.FinAuthUsersKey(), userId))
+        {
+            await _botClient.SendMessage(userId, "❌ Нет доступа к финансовому учету");
+            return;
+        }
+
+        if (!decimal.TryParse(messageText.Replace(" ", "").Replace(",", "."), NumberStyles.Currency, CultureInfo.InvariantCulture, out var amount))
+        {
+            await _botClient.SendMessage(userId, "❌ Неверный формат суммы. Введите число (например: 1500)");
+            return;
+        }
+
+        if (amount <= 0)
+        {
+            await _botClient.SendMessage(userId, "❌ Сумма должна быть больше нуля");
+            return;
+        }
+
+        // Получаем выбранную категорию из временного хранилища
+        var selectedCategoryKey = $"expense_temp_category:{userId}";
+        var category = await redis.StringGetAsync(selectedCategoryKey);
+
+        if (category.IsNullOrEmpty)
+        {
+            await _botClient.SendMessage(userId, "❌ Сначала выберите категорию через /fin_add_expense");
+            return;
+        }
+
+        // Создаем запись о расходе
+        var expense = new ExpenseRecord
+        {
+            UserId = userId,
+            Category = category.ToString(),
+            Amount = amount,
+            Description = $"Расход в категории {category}",
+            Date = DateTime.UtcNow
+        };
+
+        // Сохраняем расход
+        var currentMonth = DateTime.UtcNow.ToString("yyyy-MM");
+        await redis.ListRightPushAsync(UtilityKeys.FinExpensesKey(userId, currentMonth),
+            JsonSerializer.Serialize(expense));
+
+        // Очищаем временную категорию
+        await redis.KeyDeleteAsync(selectedCategoryKey);
+
+        await _botClient.SendMessage(userId,
+            $"✅ Расход добавлен!\n📂 Категория: {category}\n💰 Сумма: {amount}₽\n📅 Дата: {expense.Date:dd.MM.yyyy HH:mm}",
+            replyMarkup: new ReplyKeyboardRemove());
+
+        // Показываем обновленную аналитику
+        await HandleFinAnalytics(userId, $"/fin_analytics {currentMonth}", redis);
     }
 }

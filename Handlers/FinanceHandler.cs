@@ -541,7 +541,6 @@ public class FinanceHandler
 
         var action = parts[0];
         var month = parts[1];
-        var expenseIndex = int.Parse(parts[2]);
         var originalUserId = long.Parse(parts[3]);
 
         // Проверяем, что callback от того же пользователя
@@ -557,20 +556,32 @@ public class FinanceHandler
         switch (action)
         {
             case "expense_history_page":
-                var page = int.Parse(parts[2]);
-                await ShowExpenseHistoryPage(userId, month, page, redis);
+                // Для навигации по страницам используем parts[2] как номер страницы
+                if (int.TryParse(parts[2], out var page))
+                {
+                    await ShowExpenseHistoryPage(userId, month, page, redis);
+                }
                 break;
 
             case "expense_edit":
-                await StartExpenseEdit(userId, month, expenseIndex, redis);
-                break;
-
             case "expense_delete":
-                await ConfirmExpenseDelete(userId, month, expenseIndex, redis);
-                break;
-
             case "expense_delete_confirm":
-                await DeleteExpense(userId, month, expenseIndex, redis);
+                // Для операций с расходами используем parts[2] как индекс расхода
+                if (int.TryParse(parts[2], out var expenseIndex))
+                {
+                    switch (action)
+                    {
+                        case "expense_edit":
+                            await StartExpenseEdit(userId, month, expenseIndex, redis);
+                            break;
+                        case "expense_delete":
+                            await ConfirmExpenseDelete(userId, month, expenseIndex, redis);
+                            break;
+                        case "expense_delete_confirm":
+                            await DeleteExpense(userId, month, expenseIndex, redis);
+                            break;
+                    }
+                }
                 break;
 
             case "expense_delete_cancel":
